@@ -20,6 +20,9 @@
 //! | `accept`, `discard` | `proposal` | edit | the commands' results; nothing |
 //! | `undo`, `redo` | | edit | the step undone or redone |
 //! | `save` | `path` (else the project's file) | edit | where it was saved; with a window the user is asked instead |
+//! | `transport` | | read | playing, paused or stopped, the mode, the current pattern, the position |
+//! | `play` | `mode`, `pattern`, `from` (all optional) | edit | the transport, as `transport` |
+//! | `pause`, `stop` | | edit | the transport, as `transport` |
 //!
 //! A client that proposes waits for the user: the app asks them (`App::ask_proposal`).
 
@@ -199,12 +202,98 @@ impl App {
                     Ok(json!({ "asked": path.display().to_string() }))
                 }
             }
+            "transport" => Ok(self.transport_json()),
+            // The transport is the app's, not the project's: no undo step and no event, as the Play and Stop buttons.
+            "play" => {
+                need(c, Level::Edit)?;
+                self.client_play(params)?;
+                Ok(self.transport_json())
+            }
+            "pause" => {
+                need(c, Level::Edit)?;
+                if self.transport.state() == crate::transport::State::Playing {
+                    self.act(crate::app::Action::Play);
+                }
+                Ok(self.transport_json())
+            }
+            "stop" => {
+                need(c, Level::Edit)?;
+                if self.transport.playing() || self.state.rec.waiting {
+                    self.act(crate::app::Action::Stop);
+                }
+                Ok(self.transport_json())
+            }
             _ => Err(Fail(NO_METHOD, format!("no method `{m}`"))),
         };
         if matches!(m, "apply" | "accept" | "undo" | "redo") && out.is_ok() {
             self.invalidate();
         }
         out
+    }
+
+    /// What the transport is doing: `state` (playing, paused or stopped), `mode` (song or pattern, the PAT / SONG
+    /// switch), the current `pattern`'s id, `tick` (the playhead while playing or paused, else where Play starts),
+    /// `ppq` and `bpm`.
+    fn transport_json(&self) -> Value {
+        use crate::transport::State as T;
+        let s = &self.state;
+        let tp = &self.transport;
+        let state = match tp.state() {
+            T::Playing => "playing",
+            T::Paused => "paused",
+            T::Stopped if s.rec.waiting => "waiting",
+            T::Stopped => "stopped",
+        };
+        let tick = if tp.playing() { tp.tick() } else if s.song_mode { f64::from(s.playlist.pos) } else { f64::from(s.piano.marker) };
+        json!({
+            "state": state,
+            "mode": if s.song_mode { "song" } else { "pattern" },
+            "pattern": s.project.pattern(s.pattern).map(|q| q.id.0),
+            "tick": tick,
+            "ppq": s.project.ppq,
+            "bpm": s.tempo,
+        })
+    }
+
+    /// `play`: as the Play button, after `mode` ("song" / "pattern", the PAT / SONG switch), `pattern` (the current
+    /// pattern, by id) and `from` (the position, ticks) when given. Already playing, it plays on from the new place.
+    fn client_play(&mut self, params: &Value) -> Result<(), Fail> {
+        use crate::app::Action;
+        if let Some(mode) = params.get("mode").filter(|v| !v.is_null()) {
+            let song = match mode.as_str() {
+                Some("song") => true,
+                Some("pattern") => false,
+                _ => return Err(bad("`mode` is \"song\" or \"pattern\"")),
+            };
+            if song != self.state.song_mode {
+                self.act(Action::PatSong(song));
+            }
+        }
+        if let Some(id) = params.get("pattern").filter(|v| !v.is_null()) {
+            let id = id.as_u64().ok_or_else(|| bad("`pattern` is a pattern id"))? as u32;
+            let p = &self.state.project;
+            let n = p.patterns[super::command::pattern_place(p, id).map_err(bad)?].number;
+            if n != self.state.pattern {
+                self.state.pattern = n;
+                // A playing pattern goes on with the new one, from its start (a song plays on: it plays what it plays).
+                if self.transport.playing() && !self.state.song_mode {
+                    self.transport.stop();
+                    self.start_playback();
+                }
+            }
+        }
+        if let Some(t) = params.get("from").filter(|v| !v.is_null()) {
+            let t = t.as_u64().ok_or_else(|| bad("`from` is a position in ticks"))?;
+            self.set_song_pos(t.min(u64::from(u32::MAX)) as u32, true);
+        }
+        if self.state.song_mode && self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
+            return Err(failed("the playlist is empty: nothing to play as a song (play a pattern with `mode`: \"pattern\")"));
+        }
+        if self.transport.state() != crate::transport::State::Playing {
+            self.act(Action::Play);
+        }
+        self.invalidate();
+        Ok(())
     }
 
     /// The parameters of the plugin playing channel or slot `owner`.

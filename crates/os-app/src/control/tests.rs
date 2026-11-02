@@ -291,6 +291,67 @@ fn rpc_requests_and_errors() {
     assert_eq!(n["result"]["notes"], json!([{"channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64}]));
 }
 
+/// `transport` reads the transport; `play`, `pause` and `stop` need the edit level, check what they are given, and
+/// leave the project and its history alone.
+#[test]
+fn transport_methods_read_and_refuse() {
+    let mut a = app();
+    let mut c = rpc::Client { name: "Client".into(), level: Level::Edit, saves: false, token: None };
+    let call = |a: &mut App, c: &mut rpc::Client, method: &str, params: Value| -> Value {
+        let req = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        serde_json::from_str(&a.rpc_line(c, &req.to_string()).unwrap()).unwrap()
+    };
+    a.state.song_mode = false;
+    a.state.piano.marker = 96;
+    let t = call(&mut a, &mut c, "transport", json!({}));
+    assert_eq!(t["result"]["state"], "stopped", "{t}");
+    assert_eq!(t["result"]["mode"], "pattern");
+    assert_eq!(t["result"]["tick"], json!(96.0));
+    assert_eq!(t["result"]["ppq"], json!(a.state.project.ppq));
+    assert_eq!(t["result"]["pattern"], json!(a.state.project.pattern(a.state.pattern).map(|q| q.id.0)));
+    let code = |r: Value| r["error"]["code"].as_i64();
+    // Bad params, and an empty playlist in SONG mode, start nothing.
+    assert_eq!(code(call(&mut a, &mut c, "play", json!({"mode": "loud"}))), Some(-32602));
+    assert_eq!(code(call(&mut a, &mut c, "play", json!({"pattern": 9999}))), Some(-32602));
+    a.state.project.arrangements = vec![os_flp::project::default_arrangement()];
+    assert_eq!(code(call(&mut a, &mut c, "play", json!({"mode": "song"}))), Some(-32000));
+    assert!(!a.transport.playing());
+    assert!(a.state.song_mode, "the switch moved to SONG");
+    // Stopping while stopped and pausing while stopped do nothing, and neither is an undo step.
+    let steps = a.state.history.at();
+    assert_eq!(call(&mut a, &mut c, "stop", json!({}))["result"]["state"], "stopped");
+    assert_eq!(call(&mut a, &mut c, "pause", json!({}))["result"]["state"], "stopped");
+    assert_eq!(a.state.history.at(), steps);
+    // A reader reads the transport but does not drive it.
+    let mut reader = rpc::Client { name: "Reader".into(), level: Level::Read, saves: false, token: None };
+    assert!(call(&mut a, &mut reader, "transport", json!({})).get("error").is_none());
+    for m in ["play", "pause", "stop"] {
+        assert_eq!(code(call(&mut a, &mut reader, m, json!({}))), Some(-32001), "{m}");
+    }
+}
+
+/// `play` starts the pattern, `pause` holds it and `stop` rewinds it (needs an audio device).
+#[test]
+#[ignore]
+fn clients_play_pause_and_stop() {
+    let mut a = app();
+    let mut c = rpc::Client { name: "Client".into(), level: Level::Edit, saves: false, token: None };
+    let call = |a: &mut App, c: &mut rpc::Client, method: &str, params: Value| -> Value {
+        let req = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        let r: Value = serde_json::from_str(&a.rpc_line(c, &req.to_string()).unwrap()).unwrap();
+        assert!(r.get("error").is_none(), "{method}: {r}");
+        r["result"].clone()
+    };
+    let pat = a.state.project.patterns[0].id.0;
+    let r = call(&mut a, &mut c, "play", json!({"mode": "pattern", "pattern": pat}));
+    assert_eq!((r["state"].clone(), r["mode"].clone(), r["pattern"].clone()), (json!("playing"), json!("pattern"), json!(pat)));
+    assert!(a.transport.playing() && !a.transport.song());
+    assert_eq!(call(&mut a, &mut c, "pause", json!({}))["state"], "paused");
+    assert_eq!(call(&mut a, &mut c, "play", json!({}))["state"], "playing", "play resumes");
+    assert_eq!(call(&mut a, &mut c, "stop", json!({}))["state"], "stopped");
+    assert!(!a.transport.playing());
+}
+
 #[test]
 fn hosted_plugins_follow_deletes_and_undo() {
     let mut a = app();
