@@ -330,6 +330,54 @@ fn transport_methods_read_and_refuse() {
     }
 }
 
+/// `select` makes a pattern current, selects a channel and opens the piano roll scrolled to that channel's notes; it
+/// checks everything before changing anything, needs the edit level and is no undo step.
+#[test]
+fn select_shows_a_pattern_and_channel() {
+    use crate::app::Win;
+    let mut a = app();
+    let mut c = rpc::Client { name: "Client".into(), level: Level::Edit, saves: false, token: None };
+    let call = |a: &mut App, c: &mut rpc::Client, params: Value| -> Value {
+        let req = json!({"jsonrpc": "2.0", "id": 1, "method": "select", "params": params});
+        serde_json::from_str(&a.rpc_line(c, &req.to_string()).unwrap()).unwrap()
+    };
+    // A second pattern with high notes on the second channel.
+    let r = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_pattern", "name": "High"}))]).unwrap();
+    let pat = r[0]["pattern"].as_u64().unwrap();
+    let ch = a.state.project.channels[1].id.0;
+    let notes: Vec<Value> = (0..4).map(|i| json!({"channel": ch, "position": i * 96, "length": 48, "key": 96})).collect();
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_notes", "pattern": pat, "notes": notes}))]).unwrap();
+    a.state.control.settle(&mut a.state.project);
+    a.state.selected_channel = 0;
+    a.state.hide(Win::PianoRoll);
+    a.state.piano.scroll_y = 0.0;
+    let steps = a.state.history.at();
+
+    let r = call(&mut a, &mut c, json!({"pattern": pat, "channel": ch, "piano_roll": true}));
+    assert_eq!(r["result"], json!({"pattern": pat, "channel": ch, "piano_roll": true}), "{r}");
+    let number = a.state.project.patterns.iter().find(|q| u64::from(q.id.0) == pat).unwrap().number;
+    assert_eq!((a.state.pattern, a.state.selected_channel), (number, 1));
+    assert!(a.state.shown(Win::PianoRoll));
+    // Key 96 is in the 700 px view the piano roll is assumed to have before its first paint.
+    let y = (crate::views::piano::TOP_KEY - 96) as f32 * a.state.piano.row_h - a.state.piano.scroll_y;
+    assert!((0.0..700.0).contains(&y), "key 96 at {y} px");
+    assert_eq!(a.state.history.at(), steps, "no undo step");
+
+    // Closing the piano roll leaves the rest as it is.
+    let r = call(&mut a, &mut c, json!({"piano_roll": false}));
+    assert_eq!(r["result"]["piano_roll"], json!(false));
+    assert_eq!(a.state.selected_channel, 1);
+
+    // A bad id changes nothing, even beside a good one.
+    let code = |r: Value| r["error"]["code"].as_i64();
+    let first = a.state.project.patterns[0].id.0;
+    assert_eq!(code(call(&mut a, &mut c, json!({"pattern": first, "channel": 9999}))), Some(-32602));
+    assert_eq!(code(call(&mut a, &mut c, json!({"piano_roll": "yes"}))), Some(-32602));
+    assert_eq!(a.state.pattern, number);
+    let mut reader = rpc::Client { name: "Reader".into(), level: Level::Read, saves: false, token: None };
+    assert_eq!(code(call(&mut a, &mut reader, json!({"pattern": first}))), Some(-32001));
+}
+
 /// `play` starts the pattern, `pause` holds it and `stop` rewinds it (needs an audio device).
 #[test]
 #[ignore]

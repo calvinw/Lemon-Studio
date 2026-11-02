@@ -23,6 +23,7 @@
 //! | `transport` | | read | playing, paused or stopped, the mode, the current pattern, the position |
 //! | `play` | `mode`, `pattern`, `from` (all optional) | edit | the transport, as `transport` |
 //! | `pause`, `stop` | | edit | the transport, as `transport` |
+//! | `select` | `pattern`, `channel`, `piano_roll` (all optional) | edit | the current pattern, selected channel, piano roll shown |
 //!
 //! A client that proposes waits for the user: the app asks them (`App::ask_proposal`).
 
@@ -203,6 +204,13 @@ impl App {
                 }
             }
             "transport" => Ok(self.transport_json()),
+            // What the user looks at, not the project: no undo step and no event, as a click in the pattern picker or
+            // the channel rack.
+            "select" => {
+                need(c, Level::Edit)?;
+                self.client_select(params)?;
+                Ok(self.selection_json())
+            }
             // The transport is the app's, not the project's: no undo step and no event, as the Play and Stop buttons.
             "play" => {
                 need(c, Level::Edit)?;
@@ -291,6 +299,65 @@ impl App {
         }
         if self.transport.state() != crate::transport::State::Playing {
             self.act(Action::Play);
+        }
+        self.invalidate();
+        Ok(())
+    }
+
+    /// What `select` shows: the current `pattern` and the selected `channel` (ids), and whether the piano roll is
+    /// shown.
+    fn selection_json(&self) -> Value {
+        let s = &self.state;
+        json!({
+            "pattern": s.project.pattern(s.pattern).map(|q| q.id.0),
+            "channel": s.project.channels.get(s.selected_channel).map(|c| c.id.0),
+            "piano_roll": s.shown(crate::app::Win::PianoRoll),
+        })
+    }
+
+    /// `select`: makes `pattern` current, as the pattern picker does, selects `channel` in the channel rack, and with
+    /// `piano_roll` true opens the piano roll on them (false closes it). Each is optional. While the piano roll is shown
+    /// it scrolls to the channel's notes, so what was asked for is in view.
+    fn client_select(&mut self, params: &Value) -> Result<(), Fail> {
+        use crate::app::Win;
+        let given = |k: &str| params.get(k).filter(|v| !v.is_null());
+        // Check everything before changing anything.
+        let pattern = match given("pattern") {
+            Some(v) => {
+                let id = v.as_u64().ok_or_else(|| bad("`pattern` is a pattern id"))? as u32;
+                let p = &self.state.project;
+                Some(p.patterns[super::command::pattern_place(p, id).map_err(bad)?].number)
+            }
+            None => None,
+        };
+        let row = match given("channel") {
+            Some(v) => {
+                let id = v.as_u64().ok_or_else(|| bad("`channel` is a channel id"))? as u32;
+                Some(super::command::channel_row(&self.state.project, id).map_err(bad)?)
+            }
+            None => None,
+        };
+        let piano = match given("piano_roll") {
+            Some(v) => Some(v.as_bool().ok_or_else(|| bad("`piano_roll` is true or false"))?),
+            None => None,
+        };
+        if let Some(n) = pattern {
+            crate::patterns::select(&mut self.state, n);
+        }
+        if let Some(r) = row {
+            self.state.rack.select_only(r);
+            self.focus_channel(r);
+        }
+        match piano {
+            Some(true) => {
+                self.state.piano.clear_selection();
+                self.state.raise(Win::PianoRoll);
+            }
+            Some(false) => self.state.hide(Win::PianoRoll),
+            None => {}
+        }
+        if self.state.shown(Win::PianoRoll) && (pattern.is_some() || row.is_some() || piano == Some(true)) {
+            crate::piano::center_keys(&mut self.state, self.piano_grid.map_or(700.0, |g| g.h));
         }
         self.invalidate();
         Ok(())

@@ -35,7 +35,7 @@ lemonstudio --serve 7777 --control-level propose song.flp
 |---|---|
 | `read` | `hello`, `state`, `notes`, `plugins`, `params`, `history`, `events`, `proposals`, `transport` |
 | `propose` | the above, and `propose`: the app asks the user to Apply or Discard each proposal |
-| `edit` | everything, including `apply`, `accept`, `discard`, `undo`, `redo`, `save`, `play`, `pause` and `stop` |
+| `edit` | everything, including `apply`, `accept`, `discard`, `undo`, `redo`, `save`, `play`, `pause`, `stop` and `select` |
 
 `save` writes a file, an effect outside the project: with a window the user is asked first, and the answer only
 says that they were. Without a window (`--serve`) the client saves directly.
@@ -60,6 +60,7 @@ says that they were. Without a window (`--serve`) the client saves directly.
 | `transport` | | `state` (`playing`, `paused`, `stopped`, or `waiting` for input), `mode` (`song` or `pattern`), `pattern` (the current one's id), `tick` (the playhead, else where Play starts), `ppq`, `bpm` |
 | `play` | `mode` (`song` or `pattern`), `pattern`, `from` (ticks) (all optional) | As the Play button, after switching PAT / SONG, picking the current pattern and moving the position when given; resumes when paused. The result is `transport`'s |
 | `pause`, `stop` | | As the Pause and Stop buttons; Stop rewinds to where playback started. The result is `transport`'s |
+| `select` | `pattern`, `channel`, `piano_roll` (true / false) (all optional) | Makes the pattern current (as the pattern picker does), selects the channel, and opens or closes the piano roll. While the piano roll is shown it scrolls to the channel's notes. A bad id changes nothing. Result: `pattern`, `channel` (ids) and `piano_roll` (shown) |
 
 Errors use JSON-RPC's codes (-32700 parse error, -32600 invalid request, -32601 no such method, -32602 invalid
 params) and two of their own: -32000 when a command fails (an id that names nothing, a value out of range; nothing is
@@ -135,7 +136,8 @@ default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre).
 - An undone channel or effect keeps its plugin instance's state: a redo hosts it again from that state.
 - A proposal is applied to see what it changes and taken back at once; with a window the app asks the user to Apply
   or Discard it. Accepted, it is one undo step named after its client.
-- `play`, `pause` and `stop` drive the app's transport: they make no undo step and no event, as the buttons don't.
+- `play`, `pause` and `stop` drive the app's transport, and `select` changes what the window shows: they make no undo step
+  and no event, as the buttons and clicks they stand for don't.
 - `events` lists each change: `apply`, `undo`, `redo`, `proposal`, `accepted`, `discarded`, `opened` (a project was
   opened or made), and `edit` for a change made in the interface. Clients poll it with the last number they saw.
 
